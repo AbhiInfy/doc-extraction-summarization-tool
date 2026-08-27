@@ -36,13 +36,13 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Optional Claude/OpenAI wording for the PowerPoint:
+Optional AI wording for the PowerPoint:
 
 ```powershell
 copy .env.example .env
 ```
 
-Add `ANTHROPIC_API_KEY` (preferred, Claude) or `OPENAI_API_KEY`. If no key is set, the tool still builds a client briefing from the What's New text.
+Add keys in this lookup order: `ANTHROPIC_API_KEY` (Claude), then `OPENAI_API_KEY`, then `GROQ_API_KEY` (Groq). The app uses the first that works. If none work, it still builds a briefing from the What's New text.
 
 ## Run the UI
 

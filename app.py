@@ -63,11 +63,13 @@ def main() -> None:
             "and PowerPoint file."
         )
         use_ai = st.checkbox(
-            "Use Claude/OpenAI for a client-ready PPT",
+            "Use AI for a client-ready PPT",
             value=False,
-            help="Set ANTHROPIC_API_KEY (preferred) or OPENAI_API_KEY in .env. Without a key, the tool still builds a client briefing from the page text.",
+            help="Tries keys in this order: ANTHROPIC_API_KEY, then OPENAI_API_KEY, then GROQ_API_KEY. Uses the first that works. Without a working key, the tool still builds a briefing from the page text.",
         )
+        st.caption("Writes a short, precise PPT summary. The Word file stays the full document.")
         include_images = st.checkbox("Include screenshots in the Word document", value=True)
+        st.caption("Adds screenshots to the Word file only. It does not change the PowerPoint.")
         run = st.button("Generate Word + PowerPoint", type="primary")
 
     selections = list(selected) + [line.strip() for line in extra.splitlines() if line.strip()]
@@ -91,8 +93,11 @@ def main() -> None:
         for result in st.session_state.results:
             st.markdown(f"**{result.title}**")
             st.caption(f"{result.topic_count} topics  ·  {result.source_url}")
-            if result.used_ai:
-                st.caption("PowerPoint used the AI summary.")
+            if result.ai_note:
+                if result.used_ai:
+                    st.success(result.ai_note)
+                else:
+                    st.info(result.ai_note)
             if result.errors:
                 st.warning(f"{len(result.errors)} topic(s) could not be downloaded.")
             doc_col, ppt_col = st.columns(2)

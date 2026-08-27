@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .crawler import crawl_tree, load_document_tree
@@ -44,12 +45,13 @@ def process_url(
     pptx_path = output_dir / f"{slug}.pptx"
 
     if progress:
-        progress("Writing Word document", url, 0, 0)
-    build_docx(tree, docx_path, client)
-
+        progress("Writing Word and PowerPoint together", url, 0, 0)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        word_job = pool.submit(build_docx, tree, docx_path, client)
+        summary = summarize_document(tree, use_ai=use_ai)
+        word_job.result()
     if progress:
-        progress("Writing PowerPoint summary", url, 0, 0)
-    summary = summarize_document(tree, use_ai=use_ai)
+        progress("Saving PowerPoint", url, 0, 0)
     build_pptx(summary, pptx_path)
 
     return GenerationResult(
@@ -59,6 +61,7 @@ def process_url(
         docx_path=docx_path,
         pptx_path=pptx_path,
         used_ai=summary.used_ai,
+        ai_note=summary.ai_note,
         errors=errors,
     )
 

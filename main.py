@@ -39,7 +39,7 @@ def main() -> None:
     generate.add_argument("--url", action="append", default=[], help="What's New URL. Repeat for multiple.")
     generate.add_argument("--from-catalog", action="store_true", help="Use every Human Resources book on the landing page")
     generate.add_argument("--output", default="output", help="Output folder")
-    generate.add_argument("--no-ai", action="store_true", help="Skip OpenAI and use extractive PPT bullets")
+    generate.add_argument("--no-ai", action="store_true", help="Skip Claude/OpenAI/Groq and use extractive PPT bullets")
     generate.add_argument("--no-images", action="store_true", help="Do not embed screenshots in Word")
 
     args = parser.parse_args()

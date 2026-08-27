@@ -130,9 +130,13 @@ class FeatureSummary:
     whats_new: list[str] = field(default_factory=list)
     client_impact: str = ""
     enablement: str = ""
+    impact: str = ""
     talking_points: list[str] = field(default_factory=list)
     theme: str = ""
     section: str = ""
+    details: list[str] = field(default_factory=list)
+    profile_options: list[str] = field(default_factory=list)
+    takeaway: str = ""
 
 
 @dataclass
@@ -158,6 +162,7 @@ class DocumentSummary:
     categories: list[CategorySummary]
     topic_count: int
     used_ai: bool = False
+    ai_note: str = ""
     product_name: str = ""
     release: str = ""
     audience_line: str = ""
@@ -177,4 +182,5 @@ class GenerationResult:
     docx_path: Path
     pptx_path: Path
     used_ai: bool
+    ai_note: str = ""
     errors: list[str] = field(default_factory=list)
