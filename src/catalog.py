@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
@@ -19,6 +20,15 @@ def discover_human_resources_links(
     category: str = HUMAN_RESOURCES_CATEGORY,
 ) -> list[CatalogItem]:
     """Read the HCM readiness landing page and return Human Resources book links."""
+    return discover_readiness_links(client=client, landing_url=landing_url, category=category)
+
+
+def discover_readiness_links(
+    client: HttpClient | None = None,
+    landing_url: str = HCM_LANDING_URL,
+    category: str | None = HUMAN_RESOURCES_CATEGORY,
+) -> list[CatalogItem]:
+    """Read the HCM readiness landing page and return What's New book links."""
     client = client or HttpClient()
     html = client.get(landing_url).text
     soup = BeautifulSoup(html, "lxml")
@@ -29,7 +39,8 @@ def discover_human_resources_links(
     books = json.loads(script.string)
     items: list[CatalogItem] = []
     for book in books:
-        if book.get("category") != category:
+        book_category = book.get("category", "")
+        if category and book_category != category:
             continue
         relative = book.get("html")
         if not relative:
@@ -38,11 +49,60 @@ def discover_human_resources_links(
             CatalogItem(
                 title=book.get("title", "Untitled"),
                 url=_absolute_book_url(relative, landing_url),
-                category=book.get("category", category),
+                category=book_category or category or "",
                 description=book.get("description", ""),
             )
         )
     return items
+
+
+MODULE_ALIASES = {
+    "core hr": ("human resources",),
+    "compensation": ("compensation",),
+    "goals": ("talent management",),
+    "performance management": ("talent management",),
+    "recruiting": ("taleo enterprise", "taleo", "talent management"),
+    "absence management": ("absence management",),
+    "payroll": ("payroll",),
+}
+
+MODULE_SKIP = {
+    "performance management": ("enterprise performance management",),
+    "goals": ("enterprise performance management",),
+}
+
+
+def match_module_name(module_name: str, catalog: list[CatalogItem]) -> CatalogItem | None:
+    """Map a Fusion MODULE_NAME to the latest matching What's New book."""
+    module_key = _normalize(module_name)
+    needles = [module_key, *MODULE_ALIASES.get(module_key, ())]
+    skipped = MODULE_SKIP.get(module_key, ())
+    scored: list[tuple[int, str, CatalogItem]] = []
+    for item in catalog:
+        title = _normalize(item.title)
+        if any(token in title for token in skipped):
+            continue
+        score = 0
+        for needle in needles:
+            if not needle:
+                continue
+            if needle == title:
+                score = max(score, 300)
+            elif title.startswith(f"{needle} ") or title.startswith(f"{needle} what's new"):
+                score = max(score, 200)
+            elif needle in title:
+                score = max(score, 100)
+        if score:
+            scored.append((score, _release_key(item.title), item))
+    if not scored:
+        return None
+    scored.sort(key=lambda row: (row[0], row[1]), reverse=True)
+    return scored[0][2]
+
+
+def _release_key(title: str) -> str:
+    match = re.search(r"(\d{2}[A-Za-z])\b", title)
+    return match.group(1).upper() if match else ""
 
 
 def resolve_human_resources_links(

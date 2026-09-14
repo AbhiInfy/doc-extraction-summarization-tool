@@ -17,6 +17,12 @@ class CatalogItem:
 
 
 @dataclass
+class ImplementedModule:
+    module_name: str
+    catalog_item: CatalogItem | None = None
+
+
+@dataclass
 class ContentBlock:
     kind: BlockKind
     text: str = ""
