@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hmac
 from pathlib import Path
 
 import streamlit as st
@@ -20,8 +21,248 @@ load_dotenv()
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 
+
+def _password_gate() -> bool:
+    """Show the dark authentication screen and return True after login."""
+    expected_password = (os.getenv("APP_PASSWORD") or "").strip()
+
+    if not expected_password:
+        st.error("APP_PASSWORD is not configured. Please set it in the environment.")
+        return False
+
+    st.session_state.setdefault("authenticated", False)
+
+    if st.session_state.authenticated:
+        with st.sidebar:
+            if st.button("Sign out", icon=":material/logout:"):
+                st.session_state.authenticated = False
+                st.rerun()
+        return True
+
+    st.markdown(
+        """
+        <style>
+        /* ---------- Full authentication page ---------- */
+        .stApp {
+            background: #080a0f;
+        }
+
+        [data-testid="stHeader"] {
+            background: transparent;
+        }
+
+        [data-testid="stToolbar"] {
+            visibility: hidden;
+        }
+
+        .block-container {
+            max-width: 1180px;
+            padding-top: 5.5vh;
+            padding-bottom: 5vh;
+        }
+
+        /* Keep the auth card centered and compact. */
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            background: #0d1016;
+            border: 1px solid #343944;
+            border-radius: 22px;
+            box-shadow:
+                0 28px 80px rgba(0, 0, 0, 0.48),
+                0 0 0 1px rgba(255, 255, 255, 0.015) inset;
+            padding: 2.5rem 2.6rem 2.1rem 2.6rem;
+        }
+
+        .auth-icon {
+            width: 72px;
+            height: 72px;
+            margin: 0 auto 1.7rem auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 17px;
+            border: 1px solid #9c2434;
+            background: linear-gradient(145deg, #6f1524, #3e0c15);
+            color: #ffffff;
+            box-shadow: 0 12px 30px rgba(94, 12, 25, 0.25);
+        }
+
+        .auth-title {
+            margin: 0;
+            text-align: center;
+            color: #f5f6f8;
+            font-size: clamp(2rem, 3.5vw, 2.55rem);
+            line-height: 1.15;
+            font-weight: 750;
+            letter-spacing: -0.035em;
+        }
+
+        .auth-subtitle {
+            margin: 0.8rem 0 2.35rem 0;
+            text-align: center;
+            color: #9da5b1;
+            font-size: 1.03rem;
+            line-height: 1.5;
+        }
+
+        [data-testid="stWidgetLabel"] p {
+            color: #f0f2f5 !important;
+            font-weight: 650 !important;
+            font-size: 0.98rem !important;
+        }
+
+        /* Password field: dark input with an inline lock icon. */
+        [data-testid="stTextInput"] input {
+            min-height: 52px !important;
+            box-sizing: border-box !important;
+            padding-left: 50px !important;
+            padding-right: 52px !important;
+            background-color: #10131a !important;
+            background-repeat: no-repeat !important;
+            background-position: 17px 50% !important;
+            background-size: 21px 21px !important;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 24 24' fill='none' stroke='%23aeb6c2' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='4' y='10' width='16' height='11' rx='2'/%3E%3Cpath d='M8 10V7a4 4 0 0 1 8 0v3'/%3E%3C/svg%3E") !important;
+            color: #f4f5f7 !important;
+            border: 1px solid #454b57 !important;
+            border-radius: 12px !important;
+            font-size: 1rem !important;
+        }
+
+        [data-testid="stTextInput"] input:focus {
+            border-color: #68717e !important;
+            box-shadow: 0 0 0 1px #68717e !important;
+        }
+
+        [data-testid="stTextInput"] input::placeholder {
+            color: #707988 !important;
+        }
+
+        /* Continue button: full width, compact red accent. */
+        [data-testid="stButton"] button {
+            width: 100% !important;
+            min-height: 52px !important;
+            border-radius: 12px !important;
+            font-size: 1rem !important;
+            font-weight: 700 !important;
+        }
+
+        [data-testid="stButton"] button[kind="primary"] {
+            background: linear-gradient(90deg, #d7192f, #be1428) !important;
+            border: 1px solid #ec3146 !important;
+            color: #ffffff !important;
+            box-shadow: 0 10px 24px rgba(215, 25, 47, 0.18) !important;
+        }
+
+        [data-testid="stButton"] button[kind="primary"]:hover {
+            background: linear-gradient(90deg, #e31d35, #cb172b) !important;
+            border-color: #f04a5b !important;
+            color: #ffffff !important;
+        }
+
+        /* Error message stays inside the card without shifting the layout too much. */
+        [data-testid="stAlert"] {
+            margin-top: 0.75rem !important;
+            margin-bottom: 0 !important;
+        }
+
+        .auth-footer {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-top: 2rem;
+            color: #707987;
+            font-size: 0.84rem;
+            justify-content: center;
+            letter-spacing: 0.01em;
+        }
+
+        .auth-footer::before,
+        .auth-footer::after {
+            content: "";
+            height: 1px;
+            background: #343944;
+            flex: 1;
+        }
+
+        @media (max-width: 700px) {
+            .block-container {
+                padding: 2.5vh 0.9rem 4vh 0.9rem;
+            }
+
+            [data-testid="stVerticalBlockBorderWrapper"] {
+                padding: 2rem 1.25rem 1.6rem 1.25rem;
+                border-radius: 18px;
+            }
+
+            .auth-title {
+                font-size: 1.75rem;
+            }
+
+            .auth-subtitle {
+                font-size: 0.95rem;
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # A centered column gives the card the same compact proportions as the reference.
+    left, center, right = st.columns([1, 4, 1])
+    with center:
+        with st.container(border=True):
+            st.markdown(
+                """
+                <div class="auth-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" width="38" height="38" fill="none"
+                         stroke="currentColor" stroke-width="1.75"
+                         stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <path d="M14 2v6h6"/>
+                        <path d="M8 13h8"/>
+                        <path d="M8 17h6"/>
+                    </svg>
+                </div>
+                <h1 class="auth-title">Oracle HCM Readiness Extractor</h1>
+                <p class="auth-subtitle">Enter the password to access the application.</p>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            password = st.text_input(
+                "Password",
+                type="password",
+                placeholder="Enter password",
+                label_visibility="visible",
+            )
+
+            submitted = st.button(
+                "Continue  →",
+                type="primary",
+                width="stretch",
+            )
+
+            if submitted:
+                if hmac.compare_digest(password, expected_password):
+                    st.session_state.authenticated = True
+                    st.rerun()
+                else:
+                    st.error("Incorrect password.")
+
+            st.markdown(
+                '<div class="auth-footer">Authorized access only</div>',
+                unsafe_allow_html=True,
+            )
+
+    return False
+
+
+
 def main() -> None:
     st.set_page_config(page_title="HCM Readiness Extractor", layout="wide")
+
+    if not _password_gate():
+        return
+
     st.title("Oracle HCM Readiness Extractor")
     st.caption(
         "Generate Word and PowerPoint from implemented Fusion modules, "
