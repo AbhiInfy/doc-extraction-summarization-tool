@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import TypeVar
 import time
 import requests
+
+T = TypeVar("T")
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -10,6 +14,40 @@ DEFAULT_HEADERS = {
     ),
     "Accept": "text/html,application/javascript,application/json;q=0.9,*/*;q=0.8",
 }
+
+RETRYABLE = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def request_with_retry(send: Callable[[], T], attempts: int = 3, pause: float = 1.25) -> T:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return send()
+        except RETRYABLE as exc:
+            last_error = exc
+            if attempt < attempts:
+                time.sleep(pause * attempt)
+    assert last_error is not None
+    raise last_error
+
+
+def is_connection_drop(exc: BaseException | str) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "connection aborted",
+            "remotedisconnected",
+            "connection reset",
+            "timed out",
+            "read timed out",
+            "remote end closed",
+        )
+    )
 
 
 class HttpClient:
@@ -24,7 +62,11 @@ class HttpClient:
         elapsed = time.monotonic() - self._last_request
         if self._last_request and elapsed < self.delay_seconds:
             time.sleep(self.delay_seconds - elapsed)
-        response = self.session.get(url, timeout=self.timeout)
+
+        def send() -> requests.Response:
+            return self.session.get(url, timeout=self.timeout)
+
+        response = request_with_retry(send)
         self._last_request = time.monotonic()
         response.raise_for_status()
         if not response.encoding:

@@ -24,11 +24,10 @@ def process_url(
 ) -> GenerationResult:
     client = client or HttpClient()
     normalized = url.strip()
-    if normalized.rstrip("/").endswith(("hcm.html", "/hcm")):
+    if normalized.rstrip("/").endswith(("hcm.html", "/hcm", "erp.html", "/erp", "scm.html", "/scm")):
         raise ValueError(
-            "That URL is the HCM landing page. Choose one or more Human Resources "
-            "What's New links from it, for example "
-            "https://docs.oracle.com/en/cloud/saas/readiness/hcm/26c/hure-26c/index.html"
+            "That URL is a readiness landing page. Choose a What's New book from it, "
+            "for example https://docs.oracle.com/en/cloud/saas/readiness/hcm/26c/hure-26c/index.html"
         )
     if progress:
         progress("Loading table of contents", url, 0, 0)

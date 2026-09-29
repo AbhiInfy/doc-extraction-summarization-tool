@@ -7,16 +7,19 @@ from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote
 from xml.etree import ElementTree
+from xml.sax.saxutils import escape
 
 import requests
 from openpyxl import load_workbook
 
 from .catalog import discover_readiness_links, match_module_name
+from .http_client import is_connection_drop, request_with_retry
 from .models import ImplementedModule
+from .pillars import PILLARS, get_pillar, pillar_report_path
 
 DEFAULT_BASE_URL = "https://ehzq-test.fa.us2.oraclecloud.com"
-DEFAULT_REPORT_PATH = "/Custom/Module Implemented Report.xdo"
-DEFAULT_REPORT_FILE = "Module Implemented Report_Module Implemented.xlsx"
+DEFAULT_REPORT_PATH = PILLARS["HCM"].report_path
+DEFAULT_REPORT_FILE = PILLARS["HCM"].report_file
 MODULE_COLUMN = "MODULE_NAME"
 
 
@@ -24,29 +27,49 @@ def load_implemented_modules(
     output_dir: Path | None = None,
     username: str | None = None,
     password: str | None = None,
+    pillar_key: str = "HCM",
 ) -> tuple[list[ImplementedModule], Path]:
     """Download the Fusion Module Implemented report and map MODULE_NAME to What's New books."""
+    pillar = get_pillar(pillar_key)
     output_dir = output_dir or Path("output")
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_path = output_dir / DEFAULT_REPORT_FILE
-    workbook_bytes = download_module_report(username=username, password=password)
-    report_path.write_bytes(workbook_bytes)
+    report_file = output_dir / pillar.report_file
+    try:
+        workbook_bytes = download_module_report(
+            username=username,
+            password=password,
+            report_path=pillar_report_path(pillar),
+        )
+        report_file.write_bytes(workbook_bytes)
+    except Exception:
+        cached = report_file.read_bytes() if report_file.exists() else b""
+        if _looks_like_xlsx(cached):
+            workbook_bytes = cached
+        else:
+            raise
     names = read_module_names(workbook_bytes)
-    catalog = discover_readiness_links(category=None)
+    try:
+        catalog = discover_readiness_links(landing_url=pillar.landing_url, category=None)
+    except Exception:
+        catalog = []
     modules = [
         ImplementedModule(module_name=name, catalog_item=match_module_name(name, catalog))
         for name in names
     ]
     if not modules:
-        raise RuntimeError(f"No {MODULE_COLUMN} values were found in {DEFAULT_REPORT_FILE}.")
-    return modules, report_path
+        raise RuntimeError(f"No {MODULE_COLUMN} values were found in {pillar.report_file}.")
+    return modules, report_file
 
 
-def download_module_report(username: str | None = None, password: str | None = None) -> bytes:
+def download_module_report(
+    username: str | None = None,
+    password: str | None = None,
+    report_path: str | None = None,
+) -> bytes:
     base_url = (os.getenv("FUSION_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
     username = (username or os.getenv("FUSION_USERNAME") or "").strip()
     password = (password or os.getenv("FUSION_PASSWORD") or "").strip()
-    report_path = os.getenv("FUSION_BIP_REPORT_PATH") or DEFAULT_REPORT_PATH
+    report_path = (report_path or os.getenv("FUSION_BIP_REPORT_PATH") or DEFAULT_REPORT_PATH).strip()
     if not username or username.startswith("http"):
         raise RuntimeError(
             "Set FUSION_USERNAME in .env to the Fusion login user (for example john.doe), "
@@ -61,6 +84,7 @@ def download_module_report(username: str | None = None, password: str | None = N
         {
             "User-Agent": "HCM-Readiness-Extractor/1.0",
             "Accept": "*/*",
+            "Connection": "close",
         }
     )
     errors: list[str] = []
@@ -71,14 +95,20 @@ def download_module_report(username: str | None = None, password: str | None = N
             message = str(exc)
             if "invalid username or password" in message.lower():
                 raise RuntimeError(
-                    "Fusion rejected the BI Publisher login. Use the Fusion username "
-                    "(not the https://ehzq-test... URL) and password in .env or the form."
+                    "Fusion rejected the BI Publisher login for "
+                    f"{username}. Update FUSION_PASSWORD in .env, or enter the "
+                    "current Fusion username and password in the form, then download again."
                 ) from exc
             errors.append(f"{downloader.__name__}: {exc}")
             continue
         if _looks_like_xlsx(content):
             return content
         errors.append(f"{downloader.__name__}: response was not an Excel file")
+    if errors and all(is_connection_drop(item) for item in errors):
+        raise RuntimeError(
+            "Fusion closed the connection while downloading this report. "
+            "That is usually a temporary drop. Wait a few seconds and click Retry."
+        )
     detail = "; ".join(errors[-3:]) if errors else "no download method succeeded"
     raise RuntimeError(f"Could not download the Module Implemented report. {detail}")
 
@@ -171,11 +201,11 @@ def _soap_envelope(namespace: str, report_path: str, username: str, password: st
       <pub:reportRequest>
         <pub:attributeFormat>xlsx</pub:attributeFormat>
         <pub:attributeLocale>en-US</pub:attributeLocale>
-        <pub:reportAbsolutePath>{report_path}</pub:reportAbsolutePath>
+        <pub:reportAbsolutePath>{escape(report_path)}</pub:reportAbsolutePath>
         <pub:sizeOfDataChunkDownload>-1</pub:sizeOfDataChunkDownload>
       </pub:reportRequest>
-      <pub:userID>{username}</pub:userID>
-      <pub:password>{password}</pub:password>
+      <pub:userID>{escape(username)}</pub:userID>
+      <pub:password>{escape(password)}</pub:password>
     </pub:runReport>
   </soapenv:Body>
 </soapenv:Envelope>
@@ -183,15 +213,18 @@ def _soap_envelope(namespace: str, report_path: str, username: str, password: st
 
 
 def _post_soap(session: requests.Session, endpoint: str, body: str) -> bytes:
-    response = session.post(
-        endpoint,
-        data=body.encode("utf-8"),
-        headers={
-            "Content-Type": "text/xml; charset=utf-8",
-            "SOAPAction": "",
-        },
-        timeout=180,
-    )
+    def send() -> requests.Response:
+        return session.post(
+            endpoint,
+            data=body.encode("utf-8"),
+            headers={
+                "Content-Type": "text/xml; charset=utf-8",
+                "SOAPAction": "",
+            },
+            timeout=180,
+        )
+
+    response = request_with_retry(send)
     if "invalid username or password" in response.text.lower():
         raise RuntimeError("invalid username or password")
     response.raise_for_status()
@@ -201,10 +234,12 @@ def _post_soap(session: requests.Session, endpoint: str, body: str) -> bytes:
 def _run_rest_report(session: requests.Session, base_url: str, report_path: str, username: str, password: str) -> bytes:
     encoded = quote(report_path.lstrip("/").replace("/", "%2F"), safe="%")
     url = f"{base_url}/xmlpserver/services/rest/v1/reports/{encoded}/run"
-    response = session.post(
-        url,
-        files={"ReportRequest": (None, '{"attributeFormat":"xlsx","byPassCache":true}', "application/json")},
-        timeout=180,
+    response = request_with_retry(
+        lambda: session.post(
+            url,
+            files={"ReportRequest": (None, '{"attributeFormat":"xlsx","byPassCache":true}', "application/json")},
+            timeout=180,
+        )
     )
     response.raise_for_status()
     if _looks_like_xlsx(response.content):

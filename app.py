@@ -7,16 +7,13 @@ from pathlib import Path
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.catalog import (
-    HCM_LANDING_URL,
-    discover_human_resources_links,
-    discover_readiness_links,
-    resolve_human_resources_links,
-)
-from src.fusion_report import DEFAULT_REPORT_FILE, load_implemented_modules
+from src.catalog import discover_readiness_links, home_pillar, resolve_human_resources_links
+from src.fusion_report import load_implemented_modules
+from src.http_client import is_connection_drop
+from src.pillars import PILLARS, get_pillar
 from src.pipeline import process_urls
 
-load_dotenv()
+load_dotenv(override=True)
 
 OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
@@ -222,7 +219,7 @@ def _password_gate() -> bool:
                         <path d="M8 17h6"/>
                     </svg>
                 </div>
-                <h1 class="auth-title">Oracle HCM Readiness Extractor</h1>
+                <h1 class="auth-title">Oracle Cloud Readiness Extractor</h1>
                 <p class="auth-subtitle">Enter the password to access the application.</p>
                 """,
                 unsafe_allow_html=True,
@@ -258,17 +255,10 @@ def _password_gate() -> bool:
 
 
 def main() -> None:
-    st.set_page_config(page_title="HCM Readiness Extractor", layout="wide")
+    st.set_page_config(page_title="Oracle Cloud Readiness Extractor", layout="wide")
 
     if not _password_gate():
         return
-
-    st.title("Oracle HCM Readiness Extractor")
-    st.caption(
-        "Generate Word and PowerPoint from implemented Fusion modules, "
-        "or pick What's New books from the "
-        f"[HCM readiness page]({HCM_LANDING_URL})."
-    )
 
     st.session_state.setdefault("results", [])
     st.session_state.setdefault("generate_urls", [])
@@ -276,14 +266,41 @@ def main() -> None:
     st.session_state.setdefault("report_path", None)
     st.session_state.setdefault("report_error", "")
     st.session_state.setdefault("catalog", [])
-    st.session_state.setdefault("landing_url", HCM_LANDING_URL)
+    st.session_state.setdefault("catalog_error", "")
+    st.session_state.setdefault("pillar_key", "HCM")
+
+    st.title("Oracle Cloud Readiness Extractor")
+    st.caption(
+        "Generate Word and PowerPoint from implemented Fusion modules, "
+        "or pick What's New books from the selected readiness catalog."
+    )
+
+    pillar = _selected_pillar()
+    st.session_state.setdefault("landing_url", pillar.landing_url)
 
     env_user = (os.getenv("FUSION_USERNAME") or "").strip()
     default_user = "" if env_user.startswith("http") else env_user
 
-    if not st.session_state.catalog:
-        with st.spinner("Loading the Human Resources list..."):
-            st.session_state.catalog = _load_catalog(st.session_state.landing_url)
+    if not st.session_state.catalog and not st.session_state.catalog_error:
+        with st.spinner(f"Loading the {pillar.key} readiness list..."):
+            try:
+                st.session_state.catalog = _load_catalog(st.session_state.landing_url)
+                st.session_state.catalog_error = ""
+            except Exception as exc:
+                if is_connection_drop(exc):
+                    st.session_state.catalog_error = (
+                        f"The {pillar.key} readiness page closed the connection. "
+                        "Wait a few seconds and click Retry catalog."
+                    )
+                else:
+                    st.session_state.catalog_error = str(exc)
+
+    if st.session_state.catalog_error:
+        st.warning(st.session_state.catalog_error)
+        if st.button("Retry catalog"):
+            st.session_state.catalog_error = ""
+            st.session_state.catalog = []
+            st.rerun()
 
     left, right = st.columns([1.35, 1])
     with right:
@@ -300,12 +317,12 @@ def main() -> None:
 
     with left:
         implemented_tab, catalog_tab = st.tabs(
-            ["Implemented modules", "HCM readiness catalog"]
+            ["Implemented modules", "Readiness catalog"]
         )
         with implemented_tab:
-            _implemented_tab(default_user)
+            _implemented_tab(default_user, pillar)
         with catalog_tab:
-            _catalog_tab()
+            _catalog_tab(pillar)
 
     if st.session_state.generate_urls:
         urls = list(st.session_state.generate_urls)
@@ -315,24 +332,53 @@ def main() -> None:
     _show_results()
 
 
-def _implemented_tab(default_user: str) -> None:
+def _selected_pillar():
+    previous = st.session_state.get("active_pillar")
+    pillar_key = st.selectbox(
+        "Cloud application",
+        options=list(PILLARS),
+        format_func=lambda key: PILLARS[key].label,
+        key="pillar_key",
+        help="HCM, Finance, and SCM each use their own Fusion report and readiness catalog.",
+    )
+    pillar = get_pillar(pillar_key)
+    if previous != pillar_key:
+        st.session_state.active_pillar = pillar_key
+        st.session_state.landing_url = pillar.landing_url
+        st.session_state.catalog = []
+        st.session_state.catalog_error = ""
+        st.session_state.modules = []
+        st.session_state.report_path = None
+        st.session_state.report_error = ""
+        if previous is not None:
+            st.rerun()
+    return pillar
+
+
+def _implemented_tab(default_user: str, pillar) -> None:
     st.subheader("Implemented modules")
+    st.caption(f"{pillar.label} report: `{pillar.report_path}`")
     if not st.session_state.modules:
-        _load_or_prompt(default_user)
+        _load_or_prompt(default_user, pillar)
         if not st.session_state.modules:
             return
 
-    modules = st.session_state.modules
+    modules = [
+        item
+        for item in st.session_state.modules
+        if item.catalog_item or home_pillar(item.module_name) in {None, pillar.key}
+    ]
     matched = [item for item in modules if item.catalog_item]
-    unmatched = [item.module_name for item in modules if not item.catalog_item]
-    report_name = Path(st.session_state.report_path).name if st.session_state.report_path else DEFAULT_REPORT_FILE
+    unknown = [item.module_name for item in modules if not item.catalog_item]
+    report_name = Path(st.session_state.report_path).name if st.session_state.report_path else pillar.report_file
     st.caption(f"Downloaded `{report_name}` from Fusion BI Publisher.")
     if st.button("Refresh report", icon=":material/refresh:"):
         st.session_state.modules = []
         st.session_state.report_path = None
+        st.session_state.report_error = ""
         st.rerun()
-    if unmatched:
-        st.warning("No What's New book was found for: " + ", ".join(unmatched))
+    if unknown:
+        st.warning("No What's New book was found for: " + ", ".join(unknown))
     if not matched:
         st.error("None of the MODULE_NAME values matched a readiness book.")
         return
@@ -348,18 +394,19 @@ def _implemented_tab(default_user: str) -> None:
         st.rerun()
 
 
-def _catalog_tab() -> None:
-    st.subheader("Human Resources")
+def _catalog_tab(pillar) -> None:
+    st.subheader(f"{pillar.key} What's New books")
     st.caption("Books are loaded from this readiness landing page. You can edit only this URL.")
     with st.form("landing_url_form"):
         landing_url = st.text_input(
-            "HCM readiness URL",
+            "Readiness URL",
             value=st.session_state.landing_url,
-            help="Default is the Oracle HCM Cloud Applications Readiness page.",
+            key=f"landing_url_input_{pillar.key}",
+            help="Default follows the selected cloud application: HCM, Finance, or SCM.",
         )
         applied = st.form_submit_button("Load books", icon=":material/edit:")
     if applied:
-        url = landing_url.strip() or HCM_LANDING_URL
+        url = landing_url.strip() or pillar.landing_url
         try:
             catalog = _load_catalog(url)
         except Exception as exc:
@@ -375,7 +422,7 @@ def _catalog_tab() -> None:
     st.caption(f"Current list: {st.session_state.landing_url}")
     titles = [item.title for item in st.session_state.catalog]
     if not titles:
-        st.error("No Human Resources links were found on the landing page.")
+        st.error("No What's New books were found on the landing page.")
     selected = st.multiselect(
         "Select one or more links",
         options=titles,
@@ -383,7 +430,7 @@ def _catalog_tab() -> None:
     )
     if st.button("Generate Word + PowerPoint", type="primary"):
         if not selected:
-            st.warning("Select at least one Human Resources link.")
+            st.warning("Select at least one What's New book.")
             return
         try:
             items = resolve_human_resources_links(selected, catalog=st.session_state.catalog)
@@ -395,13 +442,10 @@ def _catalog_tab() -> None:
 
 
 def _load_catalog(landing_url: str):
-    items = discover_human_resources_links(landing_url=landing_url)
-    if items:
-        return items
     return discover_readiness_links(landing_url=landing_url, category=None)
 
 
-def _load_or_prompt(default_user: str) -> None:
+def _load_or_prompt(default_user: str, pillar) -> None:
     env_password = (os.getenv("FUSION_PASSWORD") or "").strip()
     if default_user and env_password and not st.session_state.report_error:
         try:
@@ -409,9 +453,16 @@ def _load_or_prompt(default_user: str) -> None:
                 OUTPUT_DIR,
                 username=default_user,
                 password=env_password,
+                pillar_key=pillar.key,
             )
         except Exception as exc:
-            st.session_state.report_error = str(exc)
+            if is_connection_drop(exc):
+                st.session_state.report_error = (
+                    f"Fusion closed the connection while downloading the {pillar.key} report. "
+                    "Wait a few seconds and click Retry."
+                )
+            else:
+                st.session_state.report_error = str(exc)
         else:
             st.session_state.modules = modules
             st.session_state.report_path = str(report_path)
@@ -419,19 +470,26 @@ def _load_or_prompt(default_user: str) -> None:
             return
 
     st.write(
-        "The app can also open the Module Implemented report on "
-        "[ehzq-test](https://ehzq-test.fa.us2.oraclecloud.com) and download "
-        f"`{DEFAULT_REPORT_FILE}`."
+        "The app opens the Module Implemented report on "
+        "[ehzq-test](https://ehzq-test.fa.us2.oraclecloud.com) and downloads "
+        f"`{pillar.report_file}`."
     )
     if st.session_state.report_error:
         st.error(st.session_state.report_error)
+        if st.button("Retry"):
+            st.session_state.report_error = ""
+            st.rerun()
     with st.form("fusion_login"):
         username = st.text_input(
             "Fusion username",
             value=default_user,
-            help="Use the Fusion login user, such as john.doe. Do not use the environment URL.",
+            help="Fusion login user, such as Tech_consultant@us.gt.com. Do not paste the environment URL.",
         )
-        password = st.text_input("Fusion password", type="password")
+        password = st.text_input(
+            "Fusion password",
+            type="password",
+            help="Leave blank to use FUSION_PASSWORD from .env.",
+        )
         submitted = st.form_submit_button("Download Module Implemented report")
     if not submitted:
         return
@@ -440,9 +498,16 @@ def _load_or_prompt(default_user: str) -> None:
             OUTPUT_DIR,
             username=username,
             password=password or env_password,
+            pillar_key=pillar.key,
         )
     except Exception as exc:
-        st.session_state.report_error = str(exc)
+        if is_connection_drop(exc):
+            st.session_state.report_error = (
+                f"Fusion closed the connection while downloading the {pillar.key} report. "
+                "Wait a few seconds and click Retry."
+            )
+        else:
+            st.session_state.report_error = str(exc)
         st.rerun()
     else:
         st.session_state.modules = modules
