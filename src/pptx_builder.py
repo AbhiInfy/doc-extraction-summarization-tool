@@ -175,24 +175,25 @@ def _theme_detail_slide(
         )
         for feature, origin in zip(chunk, positions):
             left, top = origin
-            _rect(slide, left, top, Inches(5.9), Inches(5.4), WHITE)
-            _rect(slide, left, top, Inches(0.12), Inches(5.4), TEAL)
-            _text(slide, left + Inches(0.3), top + Inches(0.15), Inches(5.4), Inches(0.7), feature.title, 15, NAVY, bold=True)
+            card_h = Inches(5.35)
+            _rect(slide, left, top, Inches(5.9), card_h, WHITE)
+            _rect(slide, left, top, Inches(0.12), card_h, TEAL)
+            _text(slide, left + Inches(0.3), top + Inches(0.12), Inches(5.4), Inches(0.58), feature.title, 14, NAVY, bold=True)
             has_image = _add_picture(
                 slide,
                 feature.image_urls[0] if feature.image_urls else "",
                 left + Inches(0.3),
-                top + Inches(0.9),
+                top + Inches(0.72),
                 Inches(5.4),
-                Inches(2.15),
+                Inches(1.85),
                 client,
             )
-            bullets = _slide_bullets(feature)
-            body_top = top + Inches(3.15) if has_image else top + Inches(0.95)
-            body_height = Inches(1.6) if has_image else Inches(3.85)
-            body = "\n".join(f"• {item}" for item in bullets[:5])
-            _text(slide, left + Inches(0.3), body_top, Inches(5.4), body_height, body, 13, DARK)
-            _text(slide, left + Inches(0.3), top + Inches(4.9), Inches(5.4), Inches(0.35), _action_label(feature.enablement), 12, TEAL, bold=True)
+            action_top_in = 4.92
+            body_top_in = 2.65 if has_image else 0.78
+            body_height_in = max(0.6, action_top_in - body_top_in - 0.08)
+            body = _fit_bullets(_slide_bullets(feature), width_in=5.4, height_in=body_height_in, font_pt=12)
+            _text(slide, left + Inches(0.3), top + Inches(body_top_in), Inches(5.4), Inches(body_height_in), body, 12, DARK)
+            _text(slide, left + Inches(0.3), top + Inches(action_top_in), Inches(5.4), Inches(0.32), _action_label(feature.enablement), 12, TEAL, bold=True)
 
 
 def _feature_deep_slide(
@@ -212,7 +213,7 @@ def _feature_deep_slide(
         Inches(2.15),
         Inches(5.7),
         Inches(3.0),
-        "\n\n".join(f"▸  {item}" for item in bullets[:6]),
+        _fit_bullets(bullets, width_in=5.7, height_in=3.0, font_pt=13, marker="▸  "),
         13,
         DARK,
     )
@@ -227,10 +228,17 @@ def _feature_deep_slide(
     else:
         _text(slide, Inches(7.0), Inches(1.65), Inches(5.6), Inches(0.4), "Setup and constraints", 14, ORACLE_RED, bold=True)
         right = feature.profile_options[:6] or feature.actions[:4] or [feature.enablement]
-        right_text = "\n\n".join(f"• {item}" for item in right if item)
-        if feature.business_benefit:
-            right_text = f"{feature.business_benefit}\n\n{right_text}"
-        _text(slide, Inches(7.0), Inches(2.15), Inches(5.6), Inches(3.0), right_text, 13, DARK)
+        setup_items = ([feature.business_benefit] if feature.business_benefit else []) + [item for item in right if item]
+        _text(
+            slide,
+            Inches(7.0),
+            Inches(2.15),
+            Inches(5.6),
+            Inches(3.0),
+            _fit_bullets(setup_items, width_in=5.6, height_in=3.0, font_pt=13),
+            13,
+            DARK,
+        )
     takeaway = feature.takeaway or "Review Steps to Enable in the Word document."
     footer = f"{feature.number}  |  {_action_label(feature.enablement)}  |  {takeaway}" if feature.number else takeaway
     _rect(slide, Inches(0.5), Inches(5.55), Inches(12.3), Inches(1.15), WHITE)
@@ -510,6 +518,10 @@ def _text(slide, left, top, width, height, text: str, size: int, color: RGBColor
     tf = box.text_frame
     tf.word_wrap = True
     tf.auto_size = None
+    tf.margin_left = Inches(0.04)
+    tf.margin_right = Inches(0.04)
+    tf.margin_top = Inches(0.02)
+    tf.margin_bottom = Inches(0.02)
     lines = (text or "").split("\n") or [""]
     for index, line in enumerate(lines):
         paragraph = tf.paragraphs[0] if index == 0 else tf.add_paragraph()
@@ -519,7 +531,7 @@ def _text(slide, left, top, width, height, text: str, size: int, color: RGBColor
         paragraph.font.bold = bold
         paragraph.font.name = "Calibri"
         paragraph.alignment = align
-        paragraph.space_after = Pt(4 if len(lines) > 1 else 0)
+        paragraph.space_after = Pt(2 if len(lines) > 1 else 0)
         paragraph.level = 0
     return box
 
@@ -538,6 +550,35 @@ def _trim(text: str, limit: int) -> str:
 def _slide_bullets(feature: FeatureSummary) -> list[str]:
     items = feature.details or feature.whats_new or ([feature.business_benefit] if feature.business_benefit else [])
     return [item for item in items if item and not str(item).strip().lower().startswith("[image]")]
+
+
+def _fit_bullets(
+    items: list[str],
+    width_in: float,
+    height_in: float,
+    font_pt: int = 12,
+    marker: str = "• ",
+) -> str:
+    chars_per_line = max(28, int(width_in * 72 / (font_pt * 0.55)))
+    line_in = (font_pt + 2) / 72
+    budget = max(1, int(height_in / line_in))
+    fitted: list[str] = []
+    used = 0
+    for item in items:
+        text = " ".join((item or "").split())
+        if not text:
+            continue
+        wraps = max(1, (len(marker) + len(text) + chars_per_line - 1) // chars_per_line)
+        if used + wraps > budget:
+            remain = budget - used
+            if remain <= 0:
+                break
+            text = _trim(text, max(20, remain * chars_per_line - len(marker)))
+            fitted.append(f"{marker}{text}")
+            break
+        fitted.append(f"{marker}{text}")
+        used += wraps
+    return "\n".join(fitted)
 
 
 def _add_picture(slide, url: str, left, top, width, height, client: HttpClient) -> bool:
