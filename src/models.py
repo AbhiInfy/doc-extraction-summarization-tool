@@ -82,8 +82,8 @@ class PageContent:
             elif block.kind == "table":
                 for row in block.rows:
                     parts.append(" | ".join(cell for cell in row if cell))
-            elif block.kind == "image" and block.caption:
-                parts.append(f"[Image] {block.caption}")
+            elif block.kind == "image":
+                continue
         return parts
 
 
@@ -143,6 +143,7 @@ class FeatureSummary:
     details: list[str] = field(default_factory=list)
     profile_options: list[str] = field(default_factory=list)
     takeaway: str = ""
+    image_urls: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -27,6 +27,12 @@ SKIP_TITLES = {
 QUALITY_COMPLETION = 4000
 GROQ_FEATURE_COMPLETION = 1800
 GROQ_DECK_COMPLETION = 2200
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
+GROQ_FALLBACK_MODELS = (
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+)
 _GROQ_WINDOW = {"start": 0.0, "tokens": 0}
 _SKIP_PROVIDERS: set[str] = set()
 
@@ -123,6 +129,7 @@ def _feature_from_node(node: TopicNode, section: str) -> FeatureSummary:
         details=details,
         profile_options=profiles,
         takeaway=_takeaway(profiles, enablement, tips),
+        image_urls=_feature_images(node),
     )
 
 
@@ -385,8 +392,8 @@ def _apply_feature_updates(briefing: DocumentSummary, items) -> int:
             continue
         whats_new = _as_list(item.get("whats_new"))
         if whats_new:
-            feature.whats_new = [_short(line, 180) for line in whats_new[:2]]
-            feature.bullets = feature.whats_new[:2]
+            feature.whats_new = [_short(line, 400) for line in whats_new[:4] if not _is_image_placeholder(line)]
+            feature.bullets = feature.whats_new[:3]
         if item.get("business_benefit"):
             feature.business_benefit = _short(str(item["business_benefit"]), 180)
         if item.get("client_impact"):
@@ -399,7 +406,7 @@ def _apply_feature_updates(briefing: DocumentSummary, items) -> int:
             feature.actions = [_short(line, 160) for line in actions[:2]]
         details = _as_list(item.get("details") or item.get("whats_new"))
         if details:
-            feature.details = [_short(line, 180) for line in details[:5]]
+            feature.details = [_short(line, 400) for line in details[:5] if not _is_image_placeholder(line)]
         if item.get("takeaway"):
             feature.takeaway = _short(str(item["takeaway"]), 220)
         updated += 1
@@ -551,39 +558,39 @@ def _call_groq(prompt: str, completion_hint: int = GROQ_FEATURE_COMPLETION) -> d
     api_key = _groq_api_key()
     if not api_key:
         return None
-    preferred = _normalize_groq_model(os.getenv("GROQ_MODEL") or "openai/gpt-oss-20b")
+    preferred = _normalize_groq_model(os.getenv("GROQ_MODEL") or GROQ_DEFAULT_MODEL)
     completion = _groq_completion_budget(prompt, completion_hint)
-    _pace_groq(_request_tokens(prompt, completion))
-    try:
-        return _call_openai_compatible(
-            prompt,
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
-            model=preferred,
-            groq=True,
-            completion_tokens=completion,
-        )
-    except Exception as exc:
-        message = str(exc).lower()
-        if "rate_limit" in message or "tokens per minute" in message or "tpm" in message or "too large" in message or "413" in message:
-            _pace_groq(_request_tokens(prompt, completion), force_wait=True)
+    last_error: Exception | None = None
+    for model in _groq_model_candidates(preferred):
+        _pace_groq(_request_tokens(prompt, completion))
+        try:
             return _call_openai_compatible(
                 prompt,
                 api_key=api_key,
                 base_url="https://api.groq.com/openai/v1",
-                model=preferred,
+                model=model,
                 groq=True,
                 completion_tokens=completion,
             )
-        fallback = "qwen/qwen3.6-27b" if preferred != "qwen/qwen3.6-27b" else "openai/gpt-oss-20b"
-        return _call_openai_compatible(
-            prompt,
-            api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
-            model=fallback,
-            groq=True,
-            completion_tokens=completion,
-        )
+        except Exception as exc:
+            last_error = exc
+            message = str(exc).lower()
+            if "rate_limit" in message or "tokens per minute" in message or "tpm" in message or "too large" in message or "413" in message:
+                _pace_groq(_request_tokens(prompt, completion), force_wait=True)
+                return _call_openai_compatible(
+                    prompt,
+                    api_key=api_key,
+                    base_url="https://api.groq.com/openai/v1",
+                    model=model,
+                    groq=True,
+                    completion_tokens=completion,
+                )
+            if _is_missing_groq_model(exc):
+                continue
+            continue
+    if last_error:
+        raise last_error
+    return None
 
 
 def _call_grok(prompt: str) -> dict | None:
@@ -723,6 +730,8 @@ def _short_error(text: str) -> str:
         return "OpenAI: no API key"
     if "too large" in lowered or "rate_limit_exceeded" in lowered or "tpm" in lowered:
         return "Groq: request exceeded the 8000-token free limit"
+    if "does not exist" in lowered or "model_not_fo" in lowered:
+        return "Groq: model is not available on this key. Set GROQ_MODEL=openai/gpt-oss-20b"
     if "unterminated" in lowered or "expecting value" in lowered:
         return "Groq: invalid JSON from the model"
     return value.split("\n", 1)[0][:180]
@@ -748,11 +757,30 @@ def _normalize_groq_model(model: str) -> str:
     if value.startswith("groq/"):
         value = value[5:]
     aliases = {
-        "llama-3.1-8b-versatile": "openai/gpt-oss-20b",
-        "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+        "llama-3.1-8b-versatile": GROQ_DEFAULT_MODEL,
+        "llama-3.1-8b-instant": GROQ_DEFAULT_MODEL,
         "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+        "qwen/qwen3.6-27b": "qwen/qwen3.8-27b",
+        "qwen3.6-27b": "qwen/qwen3.8-27b",
     }
     return aliases.get(value, value)
+
+
+def _groq_model_candidates(preferred: str) -> list[str]:
+    seen: list[str] = []
+    for model in (preferred, *GROQ_FALLBACK_MODELS):
+        value = _normalize_groq_model(model)
+        if value and value not in seen:
+            seen.append(value)
+    return seen
+
+
+def _is_missing_groq_model(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in ("does not exist", "model_not_fo", "model_not_found", "you do not have access")
+    )
 
 
 def _api_error_message(response: requests.Response) -> str:
@@ -852,11 +880,31 @@ def _prioritized_actions(features: list[FeatureSummary]) -> list[str]:
     return actions
 
 
+def _feature_images(node: TopicNode) -> list[str]:
+    content = node.content
+    if not content:
+        return []
+    urls: list[str] = []
+    for block in content.blocks:
+        url = (block.image_url or "").strip()
+        if block.kind == "image" and url and url not in urls:
+            urls.append(url)
+        if len(urls) == 3:
+            break
+    return urls
+
+
+def _is_image_placeholder(text: str) -> bool:
+    return (text or "").strip().lower().startswith("[image]")
+
+
 def _whats_new(text: str) -> list[str]:
     bullets = []
     for raw in text.splitlines():
         line = raw.strip(" -*\t")
-        if 20 < len(line) < 220 and not line.lower().startswith(("business benefit", "note:", "previous", "next")):
+        if line.lower().startswith("[image]"):
+            continue
+        if 20 < len(line) < 500 and not line.lower().startswith(("business benefit", "note:", "previous", "next")):
             bullets.append(line)
         if len(bullets) >= 4:
             return bullets
@@ -916,8 +964,10 @@ def _detail_bullets(overview: str, steps: str, tips: str, text: str) -> list[str
         if key in seen:
             continue
         seen.add(key)
-        unique.append(_short(line, 80))
-        if len(unique) == 3:
+        if _is_image_placeholder(line):
+            continue
+        unique.append(line.strip())
+        if len(unique) == 5:
             break
     return unique
 

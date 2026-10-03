@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 from pptx import Presentation
@@ -8,6 +9,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN
 from pptx.util import Inches, Pt
 
+from .http_client import HttpClient
 from .models import DocumentSummary, FeatureSummary, ThemeSummary
 
 NAVY = RGBColor(0x0B, 0x1F, 0x3A)
@@ -30,12 +32,13 @@ def build_pptx(summary: DocumentSummary, output_path: Path) -> Path:
     presentation = Presentation()
     presentation.slide_width = SLIDE_WIDTH
     presentation.slide_height = SLIDE_HEIGHT
+    client = HttpClient()
 
     _title_slide(presentation, summary)
     _overview_slide(presentation, summary)
     _feature_table_slide(presentation, summary)
     for theme, features in _theme_groups(summary)[:5]:
-        _theme_detail_slide(presentation, summary, theme, features)
+        _theme_detail_slide(presentation, summary, theme, features, client)
     _enablement_slide(presentation, summary)
     _bullets_slide(presentation, "Next steps", (summary.next_steps or _default_next_steps(summary))[:4], "")
     _add_footers(presentation, summary)
@@ -104,7 +107,7 @@ def _overview_slide(presentation: Presentation, summary: DocumentSummary) -> Non
         _rect(slide, left, top, Inches(3.85), Inches(0.1), accent)
         _text(slide, left + Inches(0.2), top + Inches(0.2), Inches(3.45), Inches(0.35), f"{index:02d}", 12, accent, bold=True)
         _text(slide, left + Inches(0.2), top + Inches(0.55), Inches(3.45), Inches(0.7), theme.title, 16, NAVY, bold=True)
-        _text(slide, left + Inches(0.2), top + Inches(1.3), Inches(3.45), Inches(0.9), _trim(theme.message, 70), 12, SLATE)
+        _text(slide, left + Inches(0.2), top + Inches(1.3), Inches(3.45), Inches(0.9), theme.message, 12, SLATE)
 
 
 def _feature_table_slide(presentation: Presentation, summary: DocumentSummary) -> None:
@@ -114,7 +117,7 @@ def _feature_table_slide(presentation: Presentation, summary: DocumentSummary) -
         heading = "Feature summary" if len(features) <= 10 else f"Feature summary ({page})"
         _heading(slide, heading, "Impact: None = not enabled by default; Small scale = minimal process change")
         rows = len(chunk) + 1
-        table_shape = slide.shapes.add_table(rows, 3, Inches(0.45), Inches(1.45), Inches(12.4), Inches(0.42 * rows + 0.2))
+        table_shape = slide.shapes.add_table(rows, 3, Inches(0.45), Inches(1.45), Inches(12.4), Inches(0.5 * rows + 0.2))
         table = table_shape.table
         table.columns[0].width = Inches(6.6)
         table.columns[1].width = Inches(2.3)
@@ -158,57 +161,80 @@ def _theme_detail_slide(
     summary: DocumentSummary,
     theme: ThemeSummary,
     features: list[FeatureSummary],
+    client: HttpClient,
 ) -> None:
     if len(features) == 1:
-        _feature_deep_slide(presentation, theme, features[0])
+        _feature_deep_slide(presentation, theme, features[0], client)
         return
-    for chunk in _chunks(features, 4) or [[]]:
+    for chunk in _chunks(features, 2) or [[]]:
         slide = _blank_slide(presentation)
         _heading(slide, theme.title, theme.message or f"{len(features)} enhancements")
         positions = (
-            (Inches(0.5), Inches(1.5)),
-            (Inches(6.9), Inches(1.5)),
-            (Inches(0.5), Inches(4.2)),
-            (Inches(6.9), Inches(4.2)),
+            (Inches(0.5), Inches(1.45)),
+            (Inches(6.9), Inches(1.45)),
         )
         for feature, origin in zip(chunk, positions):
             left, top = origin
-            _rect(slide, left, top, Inches(5.9), Inches(2.45), WHITE)
-            _rect(slide, left, top, Inches(0.12), Inches(2.45), TEAL)
-            _text(slide, left + Inches(0.3), top + Inches(0.12), Inches(5.4), Inches(0.55), feature.title, 14, NAVY, bold=True)
-            bullets = feature.details or feature.whats_new or [feature.business_benefit]
-            body = "\n".join(f"• {_trim(item, 70)}" for item in bullets[:3] if item)
-            _text(slide, left + Inches(0.3), top + Inches(0.7), Inches(5.4), Inches(1.25), body, 12, DARK)
-            _text(slide, left + Inches(0.3), top + Inches(1.95), Inches(5.4), Inches(0.35), _action_label(feature.enablement), 11, TEAL, bold=True)
+            _rect(slide, left, top, Inches(5.9), Inches(5.4), WHITE)
+            _rect(slide, left, top, Inches(0.12), Inches(5.4), TEAL)
+            _text(slide, left + Inches(0.3), top + Inches(0.15), Inches(5.4), Inches(0.7), feature.title, 15, NAVY, bold=True)
+            has_image = _add_picture(
+                slide,
+                feature.image_urls[0] if feature.image_urls else "",
+                left + Inches(0.3),
+                top + Inches(0.9),
+                Inches(5.4),
+                Inches(2.15),
+                client,
+            )
+            bullets = _slide_bullets(feature)
+            body_top = top + Inches(3.15) if has_image else top + Inches(0.95)
+            body_height = Inches(1.6) if has_image else Inches(3.85)
+            body = "\n".join(f"• {item}" for item in bullets[:5])
+            _text(slide, left + Inches(0.3), body_top, Inches(5.4), body_height, body, 13, DARK)
+            _text(slide, left + Inches(0.3), top + Inches(4.9), Inches(5.4), Inches(0.35), _action_label(feature.enablement), 12, TEAL, bold=True)
 
 
-def _feature_deep_slide(presentation: Presentation, theme: ThemeSummary, feature: FeatureSummary) -> None:
+def _feature_deep_slide(
+    presentation: Presentation,
+    theme: ThemeSummary,
+    feature: FeatureSummary,
+    client: HttpClient,
+) -> None:
     slide = _blank_slide(presentation)
     _heading(slide, theme.title, feature.title)
     _rect(slide, Inches(0.5), Inches(1.5), Inches(6.1), Inches(3.9), WHITE)
     _text(slide, Inches(0.7), Inches(1.65), Inches(5.7), Inches(0.4), "How it works", 14, TEAL, bold=True)
-    bullets = feature.details or feature.whats_new or [feature.business_benefit]
+    bullets = _slide_bullets(feature)
     _text(
         slide,
         Inches(0.7),
         Inches(2.15),
         Inches(5.7),
         Inches(3.0),
-        "\n\n".join(f"▸  {_trim(item, 85)}" for item in bullets[:5] if item),
+        "\n\n".join(f"▸  {item}" for item in bullets[:6]),
         13,
         DARK,
     )
     _rect(slide, Inches(6.8), Inches(1.5), Inches(6.0), Inches(3.9), WHITE)
-    _text(slide, Inches(7.0), Inches(1.65), Inches(5.6), Inches(0.4), "Setup and constraints", 14, ORACLE_RED, bold=True)
-    right = feature.profile_options[:4] or feature.actions[:3] or [feature.enablement]
-    right_text = "\n\n".join(f"• {_trim(item, 70)}" for item in right if item)
-    if feature.business_benefit:
-        right_text = f"{_trim(feature.business_benefit, 90)}\n\n{right_text}"
-    _text(slide, Inches(7.0), Inches(2.15), Inches(5.6), Inches(3.0), right_text, 13, DARK)
+    if feature.image_urls:
+        _text(slide, Inches(7.0), Inches(1.65), Inches(5.6), Inches(0.35), "From the What's New page", 14, ORACLE_RED, bold=True)
+        shown = _add_picture(slide, feature.image_urls[0], Inches(7.0), Inches(2.1), Inches(5.6), Inches(2.05), client)
+        if len(feature.image_urls) > 1:
+            _add_picture(slide, feature.image_urls[1], Inches(7.0), Inches(4.2), Inches(5.6), Inches(1.05), client)
+        elif not shown:
+            _text(slide, Inches(7.0), Inches(2.15), Inches(5.6), Inches(3.0), feature.business_benefit or _action_label(feature.enablement), 13, DARK)
+    else:
+        _text(slide, Inches(7.0), Inches(1.65), Inches(5.6), Inches(0.4), "Setup and constraints", 14, ORACLE_RED, bold=True)
+        right = feature.profile_options[:6] or feature.actions[:4] or [feature.enablement]
+        right_text = "\n\n".join(f"• {item}" for item in right if item)
+        if feature.business_benefit:
+            right_text = f"{feature.business_benefit}\n\n{right_text}"
+        _text(slide, Inches(7.0), Inches(2.15), Inches(5.6), Inches(3.0), right_text, 13, DARK)
     takeaway = feature.takeaway or "Review Steps to Enable in the Word document."
     footer = f"{feature.number}  |  {_action_label(feature.enablement)}  |  {takeaway}" if feature.number else takeaway
     _rect(slide, Inches(0.5), Inches(5.55), Inches(12.3), Inches(1.15), WHITE)
-    _text(slide, Inches(0.7), Inches(5.7), Inches(12.0), Inches(0.85), f"Key takeaway  {_trim(footer, 160)}", 13, NAVY)
+    _text(slide, Inches(0.7), Inches(5.7), Inches(12.0), Inches(0.85), f"Key takeaway  {footer}", 13, NAVY)
 
 
 def _enablement_slide(presentation: Presentation, summary: DocumentSummary) -> None:
@@ -243,7 +269,7 @@ def _enablement_slide(presentation: Presentation, summary: DocumentSummary) -> N
     )
     _rect(slide, Inches(0.5), Inches(4.15), Inches(12.3), Inches(2.15), WHITE)
     _text(slide, Inches(0.75), Inches(4.35), Inches(11.8), Inches(0.35), "Key takeaway", 14, ORACLE_RED, bold=True)
-    _text(slide, Inches(0.75), Inches(4.8), Inches(11.8), Inches(1.2), _trim(takeaway, 200), 15, DARK)
+    _text(slide, Inches(0.75), Inches(4.8), Inches(11.8), Inches(1.2), takeaway, 15, DARK)
 
 
 def _impact_label(enablement: str) -> str:
@@ -266,6 +292,7 @@ def _action_label(enablement: str) -> str:
 
 def _table_cell(cell, text: str, bold: bool = False, fill=None, color=DARK) -> None:
     cell.text = text or ""
+    cell.text_frame.word_wrap = True
     if fill is not None:
         cell.fill.solid()
         cell.fill.fore_color.rgb = fill
@@ -371,14 +398,14 @@ def _feature_slide(presentation: Presentation, summary: DocumentSummary, feature
         _rect(slide, left, Inches(1.55), width, Inches(4.0), WHITE)
         _rect(slide, left, Inches(1.55), width, Inches(0.12), accent)
         _text(slide, left + Inches(0.2), Inches(1.8), width - Inches(0.4), Inches(0.4), title, 15, accent, bold=True)
-        body = "\n".join(f"• {_trim(item, 150)}" for item in items[:4] if item)
+        body = "\n".join(f"• {item}" for item in items[:4] if item)
         _text(slide, left + Inches(0.2), Inches(2.3), width - Inches(0.4), Inches(3.0), body, 13, DARK)
         left += width + Inches(0.16)
 
     speak = feature.talking_points[0] if feature.talking_points else feature.client_impact
     if speak:
         _rect(slide, Inches(0.5), Inches(5.7), Inches(12.3), Inches(1.05), WHITE)
-        _text(slide, Inches(0.7), Inches(5.82), Inches(12.0), Inches(0.8), f"Say this: {_trim(speak, 220)}", 14, NAVY)
+        _text(slide, Inches(0.7), Inches(5.82), Inches(12.0), Inches(0.8), f"Say this: {speak}", 14, NAVY)
 
 
 def _feature_catalog_slide(presentation: Presentation, summary: DocumentSummary, features: list[FeatureSummary]) -> None:
@@ -395,7 +422,7 @@ def _feature_catalog_slide(presentation: Presentation, summary: DocumentSummary,
         _rect(slide, left, top, Inches(5.9), Inches(2.45), WHITE)
         _rect(slide, left, top, Inches(0.12), Inches(2.45), NAVY_MID)
         _text(slide, left + Inches(0.3), top + Inches(0.12), Inches(5.4), Inches(0.7), feature.title, 15, NAVY, bold=True)
-        _text(slide, left + Inches(0.3), top + Inches(0.85), Inches(5.4), Inches(0.9), _trim(feature.business_benefit or (feature.whats_new[0] if feature.whats_new else ""), 90), 13, DARK)
+        _text(slide, left + Inches(0.3), top + Inches(0.85), Inches(5.4), Inches(0.9), feature.business_benefit or (feature.whats_new[0] if feature.whats_new else ""), 13, DARK)
         _text(slide, left + Inches(0.3), top + Inches(1.85), Inches(5.4), Inches(0.4), feature.enablement, 12, TEAL, bold=True)
 
 
@@ -439,14 +466,14 @@ def _bullets_slide(presentation: Presentation, title: str, bullets: list[str], s
         slide = _blank_slide(presentation)
         heading = title if len(bullets) <= 5 else f"{title} ({page})"
         _heading(slide, heading, subtitle)
-        body = "\n\n".join(f"•  {_trim(item, 90)}" for item in chunk)
+        body = "\n\n".join(f"•  {item}" for item in chunk)
         _text(slide, Inches(0.65), Inches(1.55), Inches(12.1), Inches(5.2), body, 18, DARK)
 
 
 def _heading(slide, title: str, subtitle: str = "") -> None:
-    _text(slide, Inches(0.5), Inches(0.28), Inches(9.4), Inches(0.55), _trim(title, 70), 24, NAVY, bold=True)
+    _text(slide, Inches(0.5), Inches(0.28), Inches(9.4), Inches(0.52), title, 24, NAVY, bold=True)
     if subtitle:
-        _text(slide, Inches(0.5), Inches(0.82), Inches(9.4), Inches(0.4), _trim(subtitle, 110), 13, SLATE)
+        _text(slide, Inches(0.5), Inches(0.8), Inches(9.4), Inches(0.5), subtitle, 13, SLATE)
 
 
 def _pill(slide, left, top, width, height, text: str) -> None:
@@ -482,14 +509,18 @@ def _text(slide, left, top, width, height, text: str, size: int, color: RGBColor
     box = slide.shapes.add_textbox(left, top, width, height)
     tf = box.text_frame
     tf.word_wrap = True
-    paragraph = tf.paragraphs[0]
-    paragraph.text = text or ""
-    paragraph.font.size = Pt(size)
-    paragraph.font.color.rgb = color
-    paragraph.font.bold = bold
-    paragraph.font.name = "Calibri"
-    paragraph.alignment = align
-    tf.paragraphs[0].space_after = Pt(0)
+    tf.auto_size = None
+    lines = (text or "").split("\n") or [""]
+    for index, line in enumerate(lines):
+        paragraph = tf.paragraphs[0] if index == 0 else tf.add_paragraph()
+        paragraph.text = line
+        paragraph.font.size = Pt(size)
+        paragraph.font.color.rgb = color
+        paragraph.font.bold = bold
+        paragraph.font.name = "Calibri"
+        paragraph.alignment = align
+        paragraph.space_after = Pt(4 if len(lines) > 1 else 0)
+        paragraph.level = 0
     return box
 
 
@@ -502,3 +533,25 @@ def _trim(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1].rsplit(" ", 1)[0] + "…"
+
+
+def _slide_bullets(feature: FeatureSummary) -> list[str]:
+    items = feature.details or feature.whats_new or ([feature.business_benefit] if feature.business_benefit else [])
+    return [item for item in items if item and not str(item).strip().lower().startswith("[image]")]
+
+
+def _add_picture(slide, url: str, left, top, width, height, client: HttpClient) -> bool:
+    if not url:
+        return False
+    try:
+        data = client.get_bytes(url)
+        picture = slide.shapes.add_picture(BytesIO(data), left, top, width=width)
+    except Exception:
+        return False
+    max_height = int(height)
+    if picture.height > max_height:
+        scale = max_height / picture.height
+        picture.height = max_height
+        picture.width = int(picture.width * scale)
+        picture.left = int(left) + max(0, (int(width) - picture.width) // 2)
+    return True
